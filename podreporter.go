@@ -2,77 +2,139 @@ package main
 
 import (
 	"context"
-	"flag"
+	"errors"
 	"fmt"
+	"github.com/caarlos0/env/v6"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
+	"log"
+	"net/url"
 	"os"
-	//prometheus "github.com/ryotarai/prometheus-query/client"
-	//"k8s.io/apimachinery/pkg/api/errors"
+	"time"
+
+	prometheus "github.com/serge-r/podreporter/pkg/prometheus-client"
+	vault "github.com/serge-r/podreporter/pkg/vault-client"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
-	//"github.com/ymotongpoo/datemaki"
 )
 
-type container struct {
-	name []string
-	cpu int64
-	ram int64
+type podInfo struct {
+	Name       string
+	Namespace  string
+	Datacenter string
+	Containers []containerInfo
+}
+
+type containerInfo struct {
+	Name      string
+	Image     string
+	Resources *resourcesInfo
+}
+
+type resourcesInfo struct {
+	LimitsCPU int64
+	LimitsRAM int64
+	MetricCPU int64
+	MetricRAM int64
+}
+
+type kubeCluster struct {
+	Datacenter string
+	Config     *rest.Config
 }
 
 type options struct {
-	namespace string
-	format string
-	server string
-	query  string
-	start  string
-	end    string
-	step   string
+	Namespaces          []string      `env:"NAMESPACES" envSeparator:":"`
+	Datacenters         []string      `env:"DATACENTERS" envSeparator:":"`
+	AuthType            string        `env:"AUTH_TYPE" envDefault:"vault"`
+	PrometheusServerUrl url.URL       `env:"PROM_SERVER_URL"`
+	PrometheusUsername  string        `env:"PROM_USERNAME"`
+	PrometheusPassword  string        `env:"PROM_PASSWORD"`
+	PrometheusTimeout   time.Duration `env:"PROM_TIMEOUT" envDefault:"5s"`
+	VaultURL            url.URL       `env:"VAULT_URL"`
+	VaultTimeout        time.Duration `env:"VAULT_TIMEOUT" envDefault:"5s"`
+	VaultRoleID         string        `env:"VAULT_ROLE_ID"`
+	VaultSecretID       string        `env:"VAULT_SECRET_ID"`
+	VaultSecretPath     string        `env:"VAULT_SECRET_PATH"`
+	VaultEnvironment    []string      `env:"VAULT_ENVIRONMENT" envDefault:"development" envSeparator:":"`
+	SlackToken          string        `env:"SLACK_TOKEN"`
+	SlackWebhook        string        `env:"SLACK_WEBHOOK"`
+	SlackChannel        string        `env:"SLACK_CHANNEL"`
 }
 
-func parseFlags() options {
-	namespace := flag.String("namespace", "default","provide namespace to exclude from")
-	format := flag.String("format", "json", "Format (available formats are json, tsv and csv)")
-	server := flag.String("server", os.Getenv("PROMETHEUS_SERVER"), "Prometheus server URL like 'https://prometheus.example.com' (can be set by PROMETHEUS_SERVER environment variable)")
-	query := flag.String("query", "", "Query")
-	start := flag.String("start", "1 hour ago", "Start time")
-	end := flag.String("end", "now", "End time")
-	step := flag.String("step", "15s", "Step")
+func onError(err error) {
+	log.Println(err)
+	os.Exit(1)
+}
 
-	flag.Parse()
+func parseOptions() (*options, error) {
+	options := options{}
+	if err := env.Parse(&options); err != nil {
+		return nil, err
+	}
+	switch options.AuthType {
+	case "vault":
+		if len(options.Datacenters) == 0 {
+			return nil, errors.New("datacenters list is not provided")
+		}
+		if options.VaultURL.String() == "" {
+			return nil, errors.New("vault server URL is not provided")
+		}
+		if options.VaultRoleID == "" {
+			return nil, errors.New("vault role ID is not provided")
+		}
+		if options.VaultSecretID == "" {
+			return nil, errors.New("vault secret ID is not provided")
+		}
+		if options.VaultSecretPath == "" {
+			return nil, errors.New("vault secret path is not provided")
+		}
+	}
+	if options.PrometheusServerUrl.String() == "" {
+		return nil, errors.New("prometheus server URL is not provided")
+	}
+	return &options, nil
+}
 
-	return options{
-		namespace: *namespace,
-		format: *format,
-		server: *server,
-		query:  *query,
-		start:  *start,
-		end:    *end,
-		step:   *step,
+func (kub *kubeCluster) Auth(authType string, configFile []byte) error {
+	switch authType {
+	case "incluster":
+		config, err := rest.InClusterConfig()
+		if err != nil {
+			return err
+		}
+		kub.Config = config
+		return nil
+	default:
+		config, err := clientcmd.RESTConfigFromKubeConfig(configFile)
+		if err != nil {
+			return err
+		}
+		kub.Config = config
+		return nil
 	}
 }
 
-func kube_init(kubeconfig *string)  {
+func (kub *kubeCluster) ReturnPods(authtype []string, namespacesList string) *[]podInfo {
 
-}
+	var podsReport []podInfo
+	var tempPod podInfo
+	var tempCont containerInfo
+	var namespacesSelector string
 
-func main() {
+	if len(namespacesList) > 0 {
+		namespacesSelector = fmt.Sprintf("metadata.Name!=%s", namespacesList)
+	}
 
-	options := parseFlags()
-
-	config, err := rest.InClusterConfig()
+	clientset, err := kubernetes.NewForConfig(kub.Config)
 	if err != nil {
-		panic(err.Error())
-	}
-	// creates the clientset
-	clientset, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		panic(err.Error())
+		onError(err)
 	}
 
-	namespaces,err := clientset.CoreV1().Namespaces().List(context.TODO(),metav1.ListOptions{
+	namespaces, err := clientset.CoreV1().Namespaces().List(context.TODO(), metav1.ListOptions{
 		TypeMeta:             metav1.TypeMeta{},
 		LabelSelector:        "",
-		FieldSelector:        fmt.Sprintf("metadata.name!=%s",options.namespace),
+		FieldSelector:        namespacesSelector,
 		Watch:                false,
 		AllowWatchBookmarks:  false,
 		ResourceVersion:      "",
@@ -81,25 +143,79 @@ func main() {
 		Limit:                0,
 		Continue:             "",
 	})
+
 	if err != nil {
-		panic(err.Error())ß
+		onError(err)
 	}
-	fmt.Printf("I found a %s namespaces!",len(namespaces.Items))
-	for _,namespace := range namespaces.Items {
+
+	//fmt.Printf("I found a %d namespaces!",len(namespaces.Items))
+	for _, namespace := range namespaces.Items {
 		pods, err := clientset.CoreV1().Pods(namespace.Name).List(context.TODO(), metav1.ListOptions{})
 		if err != nil {
-			panic(err.Error())
+			onError(err)
 		}
-		fmt.Printf("There are %d pods in the namespace %s\n", len(pods.Items), namespace.Name)
+		//fmt.Printf("There are %d pods in the namespace %s\n", len(pods.Items), namespace.Name)
 
-		for i := 0; i < len(pods.Items); i++ {
-			pod := pods.Items[i]
-			fmt.Printf("In pod %s I found %d containers\n", pod.Name, len(pod.Spec.Containers))
-			for j := 0 ; j < len(pod.Spec.Containers); j ++ {
-				cnt := pod.Spec.Containers[j]
-				fmt.Printf("Container %s with limits: CPU %d (mils) and RAM %d MB\n", cnt.Name, cnt.Resources.Limits.Cpu().MilliValue(), cnt.Resources.Limits.Memory().MilliValue() / 1000 /1024 /1024)
+		for _, pod := range pods.Items {
+			//log.Printf("In pod %s I found %d containers\n", pod.Name, len(pod.Spec.Containers))
+			for _, cnt := range pod.Spec.Containers {
+				tempPod.Name = pod.Name
+				tempPod.Namespace = namespace.Name
+				tempCont.Name = cnt.Name
+				tempCont.Image = cnt.Image
+				tempCont.Resources.LimitsCPU = cnt.Resources.Limits.Cpu().MilliValue()
+				tempCont.Resources.LimitsRAM = cnt.Resources.Limits.Memory().MilliValue() / 1000 / 1024 / 1024
+				tempPod.Containers = append(tempPod.Containers, tempCont)
+				podsReport = append(podsReport, tempPod)
 			}
-
 		}
 	}
+	return &podsReport
+}
+
+func (podinfo *podInfo) getPrometheusInfo(prom *prometheus.Prometheus, timeout int) error {
+
+	for _, cont := range podinfo.Containers {
+		contCPUQuery := fmt.Sprintf("max_over_time(rate(container_cpu_usage_seconds_total{namespace=\"%s\",pod=\"%s\",container=\"%s\",image!=\"\"}[1w]))",
+			podinfo.Namespace,
+			podinfo.Name,
+			cont.Name)
+		contRAMQuery := fmt.Sprintf("max_over_time(rate(container_memory_rss{namespace=\"%s\",pod=\"%s\",container=\"%s\",image!=\"\"}[1w]}))",
+			podinfo.Namespace,
+			podinfo.Name,
+			cont.Name)
+		resultCPU, err := prom.InstanceQuery(contCPUQuery, timeout)
+		if err != nil {
+			return err
+		}
+		resultRAM, err := prom.InstanceQuery(contRAMQuery, timeout)
+		if err != nil {
+			return err
+		}
+		cont.Resources.MetricCPU = resultCPU.Data.Result[0].Value[1].(int64)
+		cont.Resources.MetricRAM = resultRAM.Data.Result[0].Value[1].(int64)
+	}
+	return nil
+}
+
+func main() {
+	options, err := parseOptions()
+	if err != nil {
+		onError(err)
+	}
+	fmt.Println("Just a test")
+
+	vaultClient, err := vault.VaultAuth(options.VaultURL,options.VaultTimeout, options.VaultSecretID, options.VaultRoleID)
+	if err != nil {
+		onError(err)
+	}
+	secretPath := fmt.Sprintf("%s%s/%s",options.VaultSecretPath,options.VaultEnvironment[0],options.Datacenters[0])
+	fmt.Printf(secretPath)
+	config,err := vault.VaultReturnSecret(vaultClient,secretPath,"config")
+	if err != nil {
+		onError(err)
+	}
+	fmt.Printf("%s", config)
+
+
 }
