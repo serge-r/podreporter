@@ -15,6 +15,7 @@ type Prometheus struct {
 	server *url.URL
 	username string
 	password string
+	timeout time.Duration
 	isAuth bool
 }
 
@@ -38,7 +39,7 @@ type Result struct {
 
 type Value [2]interface{}
 
-func Init(server string, username string, password string) (*Prometheus,error) {
+func Init(server string, username string, password string, timeout time.Duration) (*Prometheus,error) {
 	var prom = Prometheus{}
 	serverUrlString := fmt.Sprintf("http://%s/api/v1/query",server)
 	serverUrl, err := url.Parse(serverUrlString)
@@ -51,11 +52,12 @@ func Init(server string, username string, password string) (*Prometheus,error) {
 		prom.isAuth = true
 	}
 	prom.server = serverUrl
+	prom.timeout = timeout
 	return &prom,nil
 }
 
-func (prom *Prometheus) InstanceQuery(query string, timeout int) (*Response,error)  {
-	client := &http.Client{Timeout: time.Duration(timeout) * time.Second}
+func (prom *Prometheus) InstanceQuery(query string) (*Response,error)  {
+	client := &http.Client{Timeout: prom.timeout}
 	var data = url.Values{}
 	var result = Response{}
 
