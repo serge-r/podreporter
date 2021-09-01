@@ -1,4 +1,4 @@
-package vault_client
+package cmd
 
 import (
 	"errors"
@@ -15,14 +15,14 @@ func VaultAuth(vaultAddr url.URL, vaultTimeout time.Duration, vaultSecretID stri
 
 	client, err := api.NewClient(&api.Config{Address: vaultAddr.String(), HttpClient: httpClient})
 	if err != nil {
-		return nil,err
+		return nil, err
 	}
-	response,err := client.Logical().Write("auth/approle/login", map[string]interface{}{
+	response, err := client.Logical().Write("auth/approle/login", map[string]interface{}{
 		"role_id":   vaultRoleID,
 		"secret_id": vaultSecretID,
 	})
 	if err != nil {
-		return nil,err
+		return nil, err
 	}
 	client.SetToken(response.Auth.ClientToken)
 
@@ -30,7 +30,7 @@ func VaultAuth(vaultAddr url.URL, vaultTimeout time.Duration, vaultSecretID stri
 }
 
 func VaultReturnSecret(client *api.Client, secretPath string, secretKey string) ([]byte, error) {
-	secret,err := client.Logical().Read(secretPath)
+	secret, err := client.Logical().Read(secretPath)
 	if err != nil {
 		return nil, err
 	}
