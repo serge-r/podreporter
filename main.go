@@ -29,7 +29,7 @@ type options struct {
 	VaultEnvironment    []string      `env:"VAULT_ENVIRONMENT" envDefault:"production:development" envSeparator:":"`
 	SlackBotToken       string        `env:"SLACK_BOT_TOKEN"`
 	SlackAppToken       string        `env:"SLACK_APP_TOKEN"`
-	MaxConcurrency      int           `env:"MAX_CONCURRENCY"`
+	MaxConcurrency      int           `env:"MAX_CONCURRENCY" envDefault:"2"`
 }
 
 func initLog(o *options) *log.Entry {
@@ -90,6 +90,9 @@ func parseOptions() (*options, error) {
 	if options.SlackAppToken == "" {
 		return nil, errors.New("slack APP token not provided")
 	}
+	if options.MaxConcurrency < 2 {
+		return nil, errors.New("Please set max concurency >= 2")
+	}
 	return &options, nil
 }
 
@@ -131,8 +134,8 @@ func main() {
 	for _, dc := range options.Datacenters {
 		tempDc := cmd.Datacenter{}
 		tempDc.Name = dc
-		for _, env := range options.VaultEnvironment {
-			secretPath := fmt.Sprintf("%s/%s/%s", options.VaultSecretPath, env, dc)
+		for _, environment := range options.VaultEnvironment {
+			secretPath := fmt.Sprintf("%s/%s/%s", options.VaultSecretPath, environment, dc)
 			logger.Debug(fmt.Sprintf("I will read secrets from %v", secretPath))
 			config, err := cmd.VaultReturnSecret(vaultClient, secretPath, "config")
 			if err != nil {
@@ -163,7 +166,7 @@ func main() {
 
 	// Execute reporter
 	logger.Info("Creating reporter")
-	reporter := cmd.CreateReporter(datacenters, prom, slackClient, logger)
+	reporter := cmd.CreateReporter(datacenters, prom, slackClient, logger, options.MaxConcurrency)
 	err = reporter.FillKubePods()
 	if err != nil {
 		logger.Errorf("Error filling pods: %v", err)
