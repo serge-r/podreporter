@@ -36,21 +36,30 @@ type PodByRequestsRAM []PodInfo
 
 type PodByRequestsRAMDesc []PodInfo
 
+type PodByRatingCPU []PodInfo
+
+type PodByRatingRAM []PodInfo
+
+type PodByRatingCPUDesc []PodInfo
+
+type PodByRatingRAMDesc []PodInfo
+
 // SetRequestsRating
 // Set pod rating from compare requests
 func (pod *PodInfo) SetRequestsRating() {
+	pod.RatingCPU = 100
+
 	if pod.CPURequsts == 0 {
-		pod.RatingCPU = 0
+		pod.RatingCPU = 999
+		return
 	}
-	if pod.RAMRequests == 0 {
-		pod.RatingRAM = 0
+	if pod.CPURequsts < 2*pod.CPUMetric {
+		pod.RatingCPU = 5
+		return
 	}
 
-	if pod.CPURequsts < (pod.CPURequsts*50/100)+pod.CPUMetric {
-		pod.RatingCPU = -1
-	}
-	if pod.RAMRequests < (pod.RAMRequests*50/100)+pod.RAMMetric {
-		pod.RatingRAM = -1
+	if pod.CPURequsts > 3*pod.CPUMetric {
+		pod.RatingCPU = 5
 	}
 
 }
@@ -147,5 +156,49 @@ func (pods PodByMetricRAMDesc) Less(i, j int) bool {
 }
 
 func (pods PodByMetricRAMDesc) Swap(i, j int) {
+	pods[i], pods[j] = pods[j], pods[i]
+}
+
+// Sorting pods, Limits RAM
+func (pods PodByRatingRAM) Len() int { return len(pods) }
+
+func (pods PodByRatingRAM) Less(i, j int) bool {
+	return pods[i].RatingRAM < pods[j].RatingRAM
+}
+
+func (pods PodByRatingRAM) Swap(i, j int) {
+	pods[i], pods[j] = pods[j], pods[i]
+}
+
+// Sorting pods, Limits RAM DESC
+func (pods PodByRatingRAMDesc) Len() int { return len(pods) }
+
+func (pods PodByRatingRAMDesc) Less(i, j int) bool {
+	return pods[i].RatingRAM > pods[j].RatingRAM
+}
+
+func (pods PodByRatingRAMDesc) Swap(i, j int) {
+	pods[i], pods[j] = pods[j], pods[i]
+}
+
+// Sorting pods, Metric CPU
+func (pods PodByRatingCPU) Len() int { return len(pods) }
+
+func (pods PodByRatingCPU) Less(i, j int) bool {
+	return pods[i].RatingCPU < pods[j].RatingCPU
+}
+
+func (pods PodByRatingCPU) Swap(i, j int) {
+	pods[i], pods[j] = pods[j], pods[i]
+}
+
+// Sorting pods, Metric CPU Desc
+func (pods PodByRatingCPUDesc) Len() int { return len(pods) }
+
+func (pods PodByRatingCPUDesc) Less(i, j int) bool {
+	return pods[i].RatingCPU > pods[j].RatingCPU
+}
+
+func (pods PodByRatingCPUDesc) Swap(i, j int) {
 	pods[i], pods[j] = pods[j], pods[i]
 }

@@ -6,6 +6,7 @@ import (
 	"github.com/slack-go/slack"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -40,16 +41,16 @@ func CreateReporter(datacenters []Datacenter, prom *Prometheus, slackClient *sla
 	return &reporter
 }
 
-func (reporter *PodReporter) FillKubePods() error {
+func (reporter *PodReporter) FillKubePods(namespaceSelector []string) error {
 	var tempPods []PodInfo
 	cluster := KubeCluster{}
-	for idx, dc := range reporter.Datacenters {
+	for i, dc := range reporter.Datacenters {
 		err := cluster.AuthRemote(dc.KubeConfig)
 		if err != nil {
 			return err
 		}
-		tempPods, err = cluster.ReturnPods("prices", reporter.logger)
-		reporter.Datacenters[idx].pods = tempPods
+		tempPods, err = cluster.ReturnPods(namespaceSelector, reporter.logger)
+		reporter.Datacenters[i].pods = tempPods
 		if err != nil {
 			return err
 		}
@@ -98,6 +99,7 @@ func (reporter *PodReporter) worker(wg *sync.WaitGroup, T chan *task, R chan err
 		//taskItem.pod.CPUMetric += cpu * 1000
 		//taskItem.pod.RAMMetric += ram / 1024 / 1024
 		taskItem.pod.UpdateMetrics(cpu, ram)
+		taskItem.pod.SetRequestsRating()
 		reporter.logger.Debugf("Thread id %d - PROM CPU is %f", id, cpu)
 		reporter.logger.Debugf("Thread id %d - PROM RAM is %f", id, ram)
 	}
@@ -121,6 +123,7 @@ func (reporter *PodReporter) FillPrometheusInfo() error {
 	reporter.logger.Debugf("Generated %d workers", reporter.maxConcurrency)
 
 	start := time.Now()
+	reporter.logger.Info("Starting processing pods...")
 	go func() {
 		for i, dc := range reporter.Datacenters {
 			for j, pod := range dc.pods {
@@ -146,32 +149,117 @@ func (reporter *PodReporter) FillPrometheusInfo() error {
 	return err
 }
 
-func (reporter *PodReporter) GetReport(dcname string) {
+func (reporter *PodReporter) GetReport(slackChannel string) {
 
-	reporter.logger.Info("Start generate report")
+	var podsOutput = 5
+
+	reporter.logger.Info("Generating report")
+	blocks := []slack.Block{
+		slack.NewHeaderBlock(&slack.TextBlockObject{
+			Type: "plain_text",
+			Text: ":newspaper: Daily kubernetes resources news :newspaper:"}),
+	}
+
+	curTime := time.Now()
+	curTimeLine := fmt.Sprintf("*%s* | Dops team", curTime.Format("01-02-2006"))
+
+	blocks = append(blocks, slack.NewContextBlock("HeadLine", slack.MixedElement(slack.TextBlockObject{
+		Type: "mrkdwn",
+		Text: curTimeLine,
+	})))
+	blocks = append(blocks, slack.NewDividerBlock())
+
 	for _, dc := range reporter.Datacenters {
-		if dc.Name == dcname {
 
-			reporter.logger.Infof("\n\n\nTop 5 pods by max CPU")
-			sort.Sort(PodByMetricCPUDesc(dc.pods))
-
-			for i := 0; i < 5; i++ {
-				reporter.logger.Infof("Pod %s \t CPU: %.1f Millicores \n", dc.pods[i].Name, dc.pods[i].CPUMetric)
-			}
-
-			reporter.logger.Infof("\n\n\nTop 3 pods by max RAM")
-			sort.Sort(PodByMetricRAMDesc(dc.pods))
-
-			for i := 0; i < 5; i++ {
-				reporter.logger.Infof("Pod %s \t RAM: %.1fMi \n", dc.pods[i].Name, dc.pods[i].RAMMetric)
-			}
-
-			reporter.logger.Infof("\n\n\nTop 10 pods with 0 RAM requests")
-			sort.Sort(PodByRequestsRAM(dc.pods))
-
-			for i := 0; i < 10; i++ {
-				reporter.logger.Infof("Pod %s \t RAM: %.1fMi \t RAM Request: %.1fMI\n", dc.pods[i].Name, dc.pods[i].RAMMetric, dc.pods[i].RAMRequests)
-			}
+		if podsOutput > len(dc.pods) {
+			podsOutput = len(dc.pods)
 		}
+
+		dcString := fmt.Sprintf(":office: *Datacenter:* %s", strings.ToUpper(dc.Name))
+		blocks = append(blocks, slack.NewSectionBlock(
+			&slack.TextBlockObject{
+				Type: slack.MarkdownType,
+				Text: dcString,
+			}, nil, nil))
+
+		// Sort by CPU
+		sort.Sort(PodByMetricCPUDesc(dc.pods))
+		blocks = append(blocks, slack.NewSectionBlock(
+			&slack.TextBlockObject{
+				Type: slack.MarkdownType,
+				Text: fmt.Sprintf("*Top %d pods by CPU*", podsOutput),
+			}, nil, nil))
+
+		podString := ""
+
+		for i := 0; i < podsOutput; i++ {
+			podString += fmt.Sprintf("*Ns:* %s\t*Pod:* %s\t*CPU:* %.1fm\t *Limits:* %.1fm\n",
+				dc.pods[i].Namespace,
+				dc.pods[i].Name,
+				dc.pods[i].CPUMetric,
+				dc.pods[i].CPULimits)
+		}
+		blocks = append(blocks, slack.NewContextBlock(dc.Name+"-CPU", slack.MixedElement(slack.TextBlockObject{
+			Type: "mrkdwn",
+			Text: podString,
+		})))
+
+		// Sort By RAM
+		sort.Sort(PodByMetricRAMDesc(dc.pods))
+		blocks = append(blocks, slack.NewSectionBlock(
+			&slack.TextBlockObject{
+				Type: slack.MarkdownType,
+				Text: fmt.Sprintf("*Top %d pods by RAM*", podsOutput),
+			}, nil, nil))
+
+		podString = ""
+
+		for i := 0; i < podsOutput; i++ {
+			podString += fmt.Sprintf("*Ns:* %s\t*Pod:* %s\t*RAM:* %.1fMi\t *Limits:* %.1fMi\n",
+				dc.pods[i].Namespace,
+				dc.pods[i].Name,
+				dc.pods[i].RAMMetric,
+				dc.pods[i].RAMLimits)
+		}
+		blocks = append(blocks, slack.NewContextBlock(dc.Name+"-RAM", slack.MixedElement(slack.TextBlockObject{
+			Type: "mrkdwn",
+			Text: podString,
+		})))
+
+		// Sort by CPU rating
+		sort.Sort(PodByRatingCPU(dc.pods))
+		blocks = append(blocks, slack.NewSectionBlock(
+			&slack.TextBlockObject{
+				Type: slack.MarkdownType,
+				Text: fmt.Sprintf("*Top %d pods with possible wrong CPU requests*", podsOutput),
+			}, nil, nil))
+
+		podString = ""
+
+		for i := 0; i < podsOutput; i++ {
+			if dc.pods[i].RatingCPU > 5 {
+				continue
+			}
+			podString += fmt.Sprintf("*Ns:* %s\t*Pod:* %s\t*CPU:* %.1fm\t *Requests:* %.1fm\n",
+				dc.pods[i].Namespace,
+				dc.pods[i].Name,
+				dc.pods[i].RAMMetric,
+				dc.pods[i].CPURequsts)
+		}
+		blocks = append(blocks, slack.NewContextBlock(dc.Name+"R-RAM", slack.MixedElement(slack.TextBlockObject{
+			Type: "mrkdwn",
+			Text: podString,
+		})))
+		blocks = append(blocks, slack.NewDividerBlock())
+	}
+
+	_, _, _, err := reporter.slackClient.SendMessage(
+		slackChannel,
+		slack.MsgOptionBlocks(blocks...),
+		slack.MsgOptionAsUser(true), // Add this if you want that the bot would post message as a user, otherwise it will send response using the default slackbot
+	)
+	if err != nil {
+		fmt.Printf("%s\n", err)
+		return
 	}
 }

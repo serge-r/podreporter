@@ -9,6 +9,7 @@ import (
 	"github.com/slack-go/slack"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"time"
 )
@@ -29,7 +30,9 @@ type options struct {
 	VaultEnvironment    []string      `env:"VAULT_ENVIRONMENT" envDefault:"production:development" envSeparator:":"`
 	SlackBotToken       string        `env:"SLACK_BOT_TOKEN"`
 	SlackAppToken       string        `env:"SLACK_APP_TOKEN"`
+	SlackChannel        string        `env:"SLACK_CHANNEL"`
 	MaxConcurrency      int           `env:"MAX_CONCURRENCY" envDefault:"2"`
+	Namespaces          []string      `env:"NAMESPACES" envDefault:"kube-system" envSeparator:":"` // List of excluded namespaces
 }
 
 func initLog(o *options) *log.Entry {
@@ -90,8 +93,14 @@ func parseOptions() (*options, error) {
 	if options.SlackAppToken == "" {
 		return nil, errors.New("slack APP token not provided")
 	}
+	if options.SlackChannel == "" {
+		return nil, errors.New("slack channel not provided")
+	}
 	if options.MaxConcurrency < 2 {
-		return nil, errors.New("Please set max concurency >= 2")
+		return nil, errors.New("please set max concurency >= 2")
+	}
+	if len(options.Namespaces) > 1 {
+		sort.Strings(options.Namespaces)
 	}
 	return &options, nil
 }
@@ -130,7 +139,7 @@ func main() {
 	logger.Info("Prometheus client ready")
 
 	// Fill datacenters structure
-	logger.Debug("I found next datacenters %v", options.Datacenters)
+	logger.Debugf("I found next datacenters %s", options.Datacenters)
 	for _, dc := range options.Datacenters {
 		tempDc := cmd.Datacenter{}
 		tempDc.Name = dc
@@ -157,17 +166,21 @@ func main() {
 	slackClient := slack.New(
 		options.SlackBotToken,
 		slack.OptionDebug(false),
-		slack.OptionAppLevelToken(options.SlackAppToken),
+		//slack.OptionAppLevelToken(options.SlackAppToken),
+		//slack.OptionLog(logger)            // Not compatible wtth logrus - perhaps I can found solution
+
 	)
 	_, err = slackClient.AuthTest()
 	if err != nil {
 		logger.Fatal(err)
+		os.Exit(1)
 	}
 
 	// Execute reporter
 	logger.Info("Creating reporter")
 	reporter := cmd.CreateReporter(datacenters, prom, slackClient, logger, options.MaxConcurrency)
-	err = reporter.FillKubePods()
+	logger.Infof("Will exclude namespaces %s", options.Namespaces)
+	err = reporter.FillKubePods(options.Namespaces)
 	if err != nil {
 		logger.Errorf("Error filling pods: %v", err)
 		os.Exit(1)
@@ -177,6 +190,6 @@ func main() {
 		logger.Errorf("Error get prometheus info: %v", err)
 		os.Exit(1)
 	}
-	reporter.GetReport("lux")
+	reporter.GetReport(options.SlackChannel)
 
 }

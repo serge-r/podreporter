@@ -2,12 +2,12 @@ package cmd
 
 import (
 	"context"
-	"fmt"
 	log "github.com/sirupsen/logrus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	"sort"
 	"strings"
 )
 
@@ -34,15 +34,10 @@ func (kub *KubeCluster) AuthLocal() error {
 	return nil
 }
 
-func (kub *KubeCluster) ReturnPods(namespacesList string, logger *log.Entry) ([]PodInfo, error) {
+func (kub *KubeCluster) ReturnPods(namespacesExclude []string, logger *log.Entry) ([]PodInfo, error) {
 
 	var podsReport []PodInfo
 	var tempPod PodInfo
-	var namespacesSelector string
-
-	if len(namespacesList) > 0 {
-		namespacesSelector = fmt.Sprintf("metadata.name=%s", namespacesList)
-	}
 
 	clientset, err := kubernetes.NewForConfig(kub.Config)
 	if err != nil {
@@ -52,7 +47,6 @@ func (kub *KubeCluster) ReturnPods(namespacesList string, logger *log.Entry) ([]
 	namespaces, err := clientset.CoreV1().Namespaces().List(context.TODO(), metav1.ListOptions{
 		TypeMeta:             metav1.TypeMeta{},
 		LabelSelector:        "",
-		FieldSelector:        namespacesSelector,
 		Watch:                false,
 		AllowWatchBookmarks:  false,
 		ResourceVersion:      "",
@@ -67,6 +61,14 @@ func (kub *KubeCluster) ReturnPods(namespacesList string, logger *log.Entry) ([]
 	}
 
 	for _, namespace := range namespaces.Items {
+
+		// Exclude ns from list
+		i := sort.Search(len(namespacesExclude), func(i int) bool { return namespacesExclude[i] >= namespace.Name })
+		if i < len(namespacesExclude) && namespacesExclude[i] == namespace.Name {
+			logger.Debugf("Exclude namespace %s", namespace.Name)
+			continue
+		}
+
 		logger.Debugf("Trying to get pods from from namespace %v", namespace.Name)
 		pods, err := clientset.CoreV1().Pods(namespace.Name).List(context.TODO(), metav1.ListOptions{})
 		logger.Debugf("I found %d pods in namespace %v", len(pods.Items), namespace.Name)
